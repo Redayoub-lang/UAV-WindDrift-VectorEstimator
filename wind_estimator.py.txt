@@ -1,0 +1,100 @@
+"""
+Autonomous UAV Wind Vector Estimation & Wind Triangle Compensation Engine
+Developer: Ayoub Lahmar (@Redayoub-lang)
+Reference Frame: ENU (East-North-Up) Navigation Frame
+Domain: Flight Dynamics, Applied Aerodynamics & Dead Reckoning Navigation
+"""
+
+import math
+import numpy as np
+
+
+class WindDriftCompensator:
+
+  def __init__(
+      self,
+      airspeed_mps: float = 15.0,
+      smoothing_factor: float = 0.15,
+  ):
+    """
+    :param airspeed_mps: True Airspeed (TAS) in m/s measured via Pitot tube.
+    :param smoothing_factor: Exponential filter coefficient for turbulent noise reduction.
+    """
+    self.tas = airspeed_mps
+    self.alpha = smoothing_factor
+    self.estimated_wind = np.array([0.0, 0.0])  # Wind Vector [Wx, Wy] in m/s (ENU)
+
+  def update_wind_estimate(
+      self, heading_deg_enu: float, ground_velocity_vector: np.ndarray
+  ) -> np.ndarray:
+    """
+    Updates wind vector estimate using aerodynamic vector triangle: V_g = V_a + W => W = V_g - V_a.
+    :param heading_deg_enu: Aircraft True Heading in degrees relative to East (0=East, 90=North).
+    :param ground_velocity_vector: Observed ground velocity vector [Vg_x, Vg_y] in m/s.
+    """
+    psi = math.radians(heading_deg_enu)
+    # True Airspeed vector in ENU frame
+    v_air = np.array([self.tas * math.cos(psi), self.tas * math.sin(psi)])
+
+    # Instantaneous wind vector measurement
+    raw_wind = ground_velocity_vector - v_air
+
+    # Exponential Moving Average (EMA) filter
+    self.estimated_wind = (
+        self.alpha * raw_wind + (1.0 - self.alpha) * self.estimated_wind
+    )
+    return self.estimated_wind
+
+  def compute_crab_angle(
+      self, desired_track_deg_enu: float
+  ) -> tuple[float, float]:
+    """
+    Computes Crab Angle (heading compensation) to maintain desired ground track under crosswind.
+    :param desired_track_deg_enu: Target ground track angle in ENU degrees.
+    :return: Tuple of (Crab Angle in degrees, Compensated Heading in degrees ENU).
+    """
+    track_rad = math.radians(desired_track_deg_enu)
+    # Track unit vector and normal crosswind unit vector (90 deg CCW)
+    u_cross = np.array([-math.sin(track_rad), math.cos(track_rad)])
+
+    # Crosswind velocity component (m/s)
+    v_crosswind = np.dot(self.estimated_wind, u_cross)
+
+    # Ratio bounded to [-1.0, 1.0] to prevent arcsin domain errors
+    ratio = np.clip(-v_crosswind / self.tas, -1.0, 1.0)
+
+    crab_angle_rad = math.asin(ratio)
+    crab_angle_deg = math.degrees(crab_angle_rad)
+    compensated_heading_deg = (desired_track_deg_enu + crab_angle_deg) % 360.0
+
+    return crab_angle_deg, compensated_heading_deg
+
+
+if __name__ == "__main__":
+  print("[SYSTEM INIT] Aerodynamic Wind Drift Estimator Harness Starting...\n")
+  compensator = WindDriftCompensator(airspeed_mps=15.0)
+
+  desired_track_enu = 90.0  # Flight Track: True North (90° ENU)
+  current_heading = 90.0
+
+  # True environmental crosswind from East: Wx = -5.0 m/s, Wy = 0.0 m/s
+  true_wind = np.array([-5.0, 0.0])
+
+  for step in range(1, 6):
+    psi = math.radians(current_heading)
+    v_air = np.array([15.0 * math.cos(psi), 15.0 * math.sin(psi)])
+    v_ground_sim = v_air + true_wind  # Simulated GPS/Optical Ground Speed
+
+    est_w = compensator.update_wind_estimate(current_heading, v_ground_sim)
+    crab_deg, comp_heading = compensator.compute_crab_angle(desired_track_enu)
+
+    current_heading = comp_heading  # Feedback loop update
+
+    print(
+        f"Iter {step} | Wind Est: [Wx: {est_w[0]:.2f} m/s, Wy: {est_w[1]:.2f}"
+        " m/s]"
+    )
+    print(
+        f"        | Crab Angle: {crab_deg:.2f}° -> Corrected Heading:"
+        f" {comp_heading:.2f}° ENU"
+    )
